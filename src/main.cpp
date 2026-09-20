@@ -7,6 +7,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <ArduinoOTA.h>
 #include <Wire.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
@@ -24,12 +25,15 @@ const uint16_t mqtt_port      = 1883;
 const char* mqtt_client_id    = "esp32-pump-01"; // <=23 chars, unique per device
 const char* mqtt_cmd_topic    = "esp32/pump/cmd";
 const char* mqtt_resp_topic   = "esp32/pump/resp";
+const char* mqtt_status_topic = "esp32/pump/status";
 
 const char* mqtt_user = MQTT_USER;
 const char* mqtt_pass = MQTT_PASS;
 
 const char* ssid     = WIFI_SSID;
 const char* password = WIFI_PASSWORD;
+
+const char* ota_password = OTA_PASSWORD;
 // ----------------------------------------
 
 // ---------- I2C / PUMP SETTINGS ----------
@@ -49,7 +53,7 @@ static const uint8_t CHANNELS_PER_BOARD = 4;
 // Per-board GPIO mapping for PROFET control.
 static const int8_t BOARD_OUT_PINS[][CHANNELS_PER_BOARD] = {
   {32, 33, 27, 25},   // Board 0: pump_1–pump_4
-  {26, 13, -1, -1},   // Board 1: pump_5–pump_6
+  {26, 13, -1, -1},   // Board 1: phup–phdown
 };
 static const size_t BOARD_COUNT = sizeof(BOARD_OUT_PINS) / sizeof(BOARD_OUT_PINS[0]);
 
@@ -58,8 +62,8 @@ static PumpConfig pumps[] = {
   {"micro",  0x65, 0, 2, 1.0f},  // pump_2 — FloraMicro
   {"gro",    0x66, 0, 3, 1.0f},  // pump_3 — FloraGro
   {"bloom",  0x68, 0, 4, 1.0f},  // pump_4 — FloraBloom
-  {"pump_5", 0x69, 1, 1, 1.0f},
-  {"pump_6", 0x6A, 1, 2, 1.0f},
+  {"phup",   0x69, 1, 1, 1.0f},  // pump_5 — pH Up
+  {"phdown", 0x6A, 1, 2, 1.0f},  // pump_6 — pH Down
   //{"pump_7", 0x67, 1, 3, 1.0f},
 };
 static const size_t PUMP_COUNT = sizeof(pumps) / sizeof(pumps[0]);
@@ -276,7 +280,67 @@ static bool isContinuousCommand(const String& cmd) {
   return false;
 }
 
-static void publishPumpEvent(const String& pumpId, const String& requestId, const String& state, int queuePosition = -1, const String& reason = "") {
+// Dose result metadata attached to completion/running events so the Pi can log what actually happened
+struct DoseMeta {
+  float requestedMl = -1.0f;   // what the command asked for
+  float estimatedMl = -1.0f;   // ESP32 timer-based estimate
+  float reportedMl  = -1.0f;   // pump-reported value (e.g. parsed from *DONE,v)
+  String resultSource;          // "estimated" | "pump_reported" | "requested_only" | "unknown"
+};
+
+// Parse requested volume from D,<ml> or DS,<ml>,<min>
+static float parseDoseMl(const String& cmd) {
+  String c = cmd; c.trim();
+  if (c.length() >= 2 && c.substring(0,2).equalsIgnoreCase("D,") && c.indexOf('*') < 0) {
+    float ml = c.substring(2).toFloat();
+    if (ml < 0) ml = -ml;
+    return (ml > 0) ? ml : -1.0f;
+  }
+  if (c.length() >= 3 && c.substring(0,3).equalsIgnoreCase("DS,")) {
+    int comma = c.indexOf(',', 3);
+    if (comma > 2) {
+      float ml = c.substring(3, comma).toFloat();
+      if (ml < 0) ml = -ml;
+      return (ml > 0) ? ml : -1.0f;
+    }
+  }
+  return -1.0f;
+}
+
+// Parse pump-reported volume from *DONE,<v> (returned by X stop command)
+static float parseDoneResponse(const String& raw) {
+  if (raw.startsWith("*DONE,")) {
+    float ml = raw.substring(6).toFloat();
+    if (ml < 0) ml = -ml;
+    return ml;
+  }
+  return -1.0f;
+}
+
+static void publishControllerStatus(const String& state, bool retained = false) {
+  JsonDocument doc;
+  doc["v"] = 1;
+  doc["type"] = "controller_status";
+  doc["controller_id"] = mqtt_client_id;
+  doc["state"] = state;
+  if (state == "online") {
+    doc["wifi"] = "connected";
+    doc["mqtt"] = "connected";
+    doc["ip"] = WiFi.localIP().toString();
+    doc["uptime_sec"] = (unsigned long)(millis() / 1000);
+  } else if (state == "alive") {
+    doc["uptime_sec"] = (unsigned long)(millis() / 1000);
+    doc["free_heap"] = (unsigned long)ESP.getFreeHeap();
+    doc["wifi_rssi"] = (int)WiFi.RSSI();
+    doc["active_batch"] = activeBatch.active;
+    doc["motor_busy"] = activeJob.busy;
+  }
+  String payload;
+  serializeJson(doc, payload);
+  mqttClient.publish(mqtt_status_topic, payload.c_str(), retained);
+}
+
+static void publishPumpEvent(const String& pumpId, const String& requestId, const String& state, int queuePosition = -1, const String& reason = "", const DoseMeta& dose = DoseMeta()) {
   JsonDocument evt;
   evt["v"] = 1;
   evt["type"] = "pump_event";
@@ -285,6 +349,10 @@ static void publishPumpEvent(const String& pumpId, const String& requestId, cons
   evt["state"] = state;
   if (queuePosition > 0) evt["queue_position"] = queuePosition;
   if (reason.length()) evt["reason"] = reason;
+  if (dose.requestedMl >= 0) evt["requested_ml"] = dose.requestedMl;
+  if (dose.estimatedMl >= 0) evt["estimated_ml"] = dose.estimatedMl;
+  if (dose.reportedMl  >= 0) evt["reported_ml"]  = dose.reportedMl;
+  if (dose.resultSource.length()) evt["result_source"] = dose.resultSource;
 
   String payload;
   serializeJson(evt, payload);
@@ -305,7 +373,7 @@ static void publishBatchEvent(const String& batchId, const String& state, int fa
   mqttClient.publish(mqtt_resp_topic, payload.c_str(), false);
 }
 
-static void publishBatchItemEvent(const String& batchId, const BatchItem& item, size_t index, const String& state, const String& reason = "") {
+static void publishBatchItemEvent(const String& batchId, const BatchItem& item, size_t index, const String& state, const String& reason = "", uint32_t postDelayMs = 0, const DoseMeta& dose = DoseMeta()) {
   JsonDocument evt;
   evt["v"] = 1;
   evt["type"] = "batch_item_event";
@@ -315,7 +383,12 @@ static void publishBatchItemEvent(const String& batchId, const BatchItem& item, 
   evt["cmd"] = item.cmd;
   evt["state"] = state;
   evt["index"] = (int)index;
+  if (postDelayMs > 0) evt["post_delay_ms"] = postDelayMs;
   if (reason.length()) evt["reason"] = reason;
+  if (dose.requestedMl >= 0) evt["requested_ml"] = dose.requestedMl;
+  if (dose.estimatedMl >= 0) evt["estimated_ml"] = dose.estimatedMl;
+  if (dose.reportedMl  >= 0) evt["reported_ml"]  = dose.reportedMl;
+  if (dose.resultSource.length()) evt["result_source"] = dose.resultSource;
   String payload;
   serializeJson(evt, payload);
   mqttClient.publish(mqtt_resp_topic, payload.c_str(), false);
@@ -346,13 +419,18 @@ static void clearActiveJob(bool fromBatch = false, bool jobFailed = false, const
     if (!jobFailed) {
       // Publish item completed before deciding whether to delay or advance
       BatchItem& completed = activeBatch.items[activeBatch.currentIndex];
-      publishBatchItemEvent(activeBatch.batchId, completed, activeBatch.currentIndex, "completed");
+      {
+        float reqMl = parseDoseMl(completed.cmd);
+        DoseMeta dose;
+        if (reqMl >= 0) { dose.requestedMl = reqMl; dose.estimatedMl = reqMl; dose.resultSource = "estimated"; }
+        publishBatchItemEvent(activeBatch.batchId, completed, activeBatch.currentIndex, "completed", "", 0, dose);
+      }
 
       if (completed.postDelayMs > 0) {
         activeBatch.waitingPostDelay = true;
         activeBatch.postDelayUntil   = millis() + completed.postDelayMs;
         publishBatchItemEvent(activeBatch.batchId, completed, activeBatch.currentIndex,
-                              "post_delay", String(completed.postDelayMs) + "ms");
+                              "post_delay", "", completed.postDelayMs);
         return;
       }
     }
@@ -388,7 +466,10 @@ static void advanceBatch(bool lastItemFailed, bool publishPriorCompleted, const 
     idx = activeBatch.currentIndex;
     BatchItem& item = activeBatch.items[idx];
 
-    publishBatchItemEvent(activeBatch.batchId, item, idx, "running");
+    {
+      DoseMeta runDose; runDose.requestedMl = parseDoseMl(item.cmd);
+      publishBatchItemEvent(activeBatch.batchId, item, idx, "running", "", 0, runDose);
+    }
 
     if (item.isMotor) {
       String c = item.cmd; c.trim();
@@ -464,8 +545,18 @@ static void advanceBatch(bool lastItemFailed, bool publishPriorCompleted, const 
   }
 
   // All items done
-  publishBatchEvent(activeBatch.batchId, "completed");
+  size_t doneCount = activeBatch.totalCount;
+  String doneBatchId = activeBatch.batchId;
   activeBatch.active = false;
+  JsonDocument doneEvt;
+  doneEvt["v"] = 1;
+  doneEvt["type"] = "batch_event";
+  doneEvt["batch_id"] = doneBatchId;
+  doneEvt["state"] = "completed";
+  doneEvt["count"] = (int)doneCount;
+  String donePayload;
+  serializeJson(doneEvt, donePayload);
+  mqttClient.publish(mqtt_resp_topic, donePayload.c_str(), false);
 }
 
 static bool enqueueMotorJob(const PumpJob& job, int& outQueuePosition) {
@@ -559,7 +650,16 @@ static CommandResult stopActiveMotorForPump(const String& pumpId) {
 
   CommandResult stopResp = pumpQuery(*activeJob.pump, "X", 150);
   pumpPowerSet(*activeJob.pump, false);
-  publishPumpEvent(activeJob.pumpId, activeJob.requestId, "completed");
+  {
+    float reqMl = parseDoseMl(activeJob.cmd);
+    float repMl = parseDoneResponse(stopResp.raw);
+    DoseMeta dose;
+    if (reqMl >= 0) dose.requestedMl = reqMl;
+    if (repMl >= 0) { dose.reportedMl = repMl; dose.resultSource = "pump_reported"; }
+    else if (reqMl >= 0) { dose.estimatedMl = reqMl; dose.resultSource = "estimated"; }
+    else { dose.resultSource = "unknown"; }
+    publishPumpEvent(activeJob.pumpId, activeJob.requestId, "completed", -1, "", dose);
+  }
   clearActiveJob(true, false);
   return stopResp;
 }
@@ -570,7 +670,9 @@ static void serviceMotorScheduler() {
     if (dequeueMotorJob(nextJob)) {
       CommandResult startRes = startMotorJob(nextJob);
       if (startRes.ok) {
-        publishPumpEvent(nextJob.pumpId, nextJob.requestId, "running");
+        DoseMeta runDose;
+        runDose.requestedMl = parseDoseMl(nextJob.cmd);
+        publishPumpEvent(nextJob.pumpId, nextJob.requestId, "running", -1, "", runDose);
       } else {
         publishPumpEvent(nextJob.pumpId, nextJob.requestId, "rejected", -1, startRes.raw);
       }
@@ -638,7 +740,12 @@ static void serviceMotorScheduler() {
       if ((long)(now - activeJob.expectedDoneAt) >= 0) {
         Serial.printf("[SCHED] %s done (timer)\n", activeJob.pumpId.c_str());
         pumpPowerSet(*activeJob.pump, false);
-        publishPumpEvent(activeJob.pumpId, activeJob.requestId, "completed");
+        {
+          float reqMl = parseDoseMl(activeJob.cmd);
+          DoseMeta dose;
+          if (reqMl >= 0) { dose.requestedMl = reqMl; dose.estimatedMl = reqMl; dose.resultSource = "estimated"; }
+          publishPumpEvent(activeJob.pumpId, activeJob.requestId, "completed", -1, "", dose);
+        }
         clearActiveJob(true, false);
       }
       break;
@@ -681,6 +788,23 @@ static void connectToWifi() {
   } else {
     Serial.println("WiFi connect timeout.");
   }
+}
+
+static void setupOTA() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  ArduinoOTA.setHostname(mqtt_client_id);
+  ArduinoOTA.setPassword(ota_password);
+  ArduinoOTA.onStart([]() {
+    Serial.println("[OTA] update starting");
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("[OTA] update complete");
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("[OTA] error [%u]\n", error);
+  });
+  ArduinoOTA.begin();
+  Serial.println("[OTA] ready");
 }
 
 // ---- BATCH COMMAND PROCESSOR ----
@@ -743,7 +867,10 @@ static String processBatchCommand(const JsonDocument& doc) {
   // Simplest: directly start item 0 inline (mirrors advanceBatch's while body).
   {
     BatchItem& first = activeBatch.items[0];
-    publishBatchItemEvent(batchId, first, 0, "running");
+    {
+      DoseMeta runDose; runDose.requestedMl = parseDoseMl(first.cmd);
+      publishBatchItemEvent(batchId, first, 0, "running", "", 0, runDose);
+    }
 
     String fc = first.cmd; fc.trim();
     bool firstIsStop  = fc.equalsIgnoreCase("X");
@@ -898,6 +1025,31 @@ static void onMqttMessage(char* topic, byte* payload, unsigned int len) {
       resultObj["status_code"] = statusCode;
       resultObj["raw"] = raw;
       serializeJson(resp, result);
+    } else if (type.equalsIgnoreCase("batch_abort")) {
+      JsonDocument resp;
+      resp["v"] = 1;
+      resp["type"] = "batch_abort_response";
+      if (activeBatch.active) {
+        String abortedBatchId = activeBatch.batchId;
+        size_t abortedAt = activeBatch.currentIndex;
+        // Mark inactive first so clearActiveJob won't try to advance the batch
+        activeBatch.active = false;
+        activeBatch.waitingForMotor = false;
+        activeBatch.waitingPostDelay = false;
+        // Stop the running motor immediately
+        if (activeJob.busy && activeJob.pump) {
+          pumpQuery(*activeJob.pump, "X", 150);
+          clearActiveJob(false, false);
+        }
+        publishBatchEvent(abortedBatchId, "aborted", (int)abortedAt, "abort_requested");
+        resp["ok"] = true;
+        resp["batch_id"] = abortedBatchId;
+        resp["aborted_at"] = (int)abortedAt;
+      } else {
+        resp["ok"] = false;
+        resp["reason"] = "no_active_batch";
+      }
+      serializeJson(resp, result);
     } else {
       String pumpId = "pump_1";
       if (!doc["pump_id"].isNull()) pumpId = doc["pump_id"].as<String>();
@@ -975,7 +1127,8 @@ static void onMqttMessage(char* topic, byte* payload, unsigned int len) {
           statusCode = startRes.statusCode;
           raw = startRes.ok ? "RUNNING" : startRes.raw;
           if (startRes.ok) {
-            publishPumpEvent(pumpId, requestId, "running");
+            DoseMeta runDose; runDose.requestedMl = parseDoseMl(cmd);
+            publishPumpEvent(pumpId, requestId, "running", -1, "", runDose);
           } else {
             publishPumpEvent(pumpId, requestId, "rejected", -1, startRes.raw);
           }
@@ -1043,7 +1196,16 @@ static bool mqttConnectOnce() {
   mqttClient.setCallback(onMqttMessage);
   mqttClient.setKeepAlive(20);
   mqttClient.setBufferSize(1024);
-  bool ok = mqttClient.connect(mqtt_client_id, mqtt_user, mqtt_pass);
+
+  // Build LWT offline payload
+  String lwtPayload = "{\"v\":1,\"type\":\"controller_status\",\"controller_id\":\"";
+  lwtPayload += mqtt_client_id;
+  lwtPayload += "\",\"state\":\"offline\"}";
+
+  bool ok = mqttClient.connect(
+    mqtt_client_id, mqtt_user, mqtt_pass,
+    mqtt_status_topic, 0, true, lwtPayload.c_str()
+  );
   // bool ok = mqttClient.connect(mqtt_client_id);
 
   if (!ok) {
@@ -1052,12 +1214,20 @@ static bool mqttConnectOnce() {
   }
 
   mqttClient.subscribe(mqtt_cmd_topic);
+  publishControllerStatus("online", /*retained=*/true);
 
   Serial.println("[MQTT] connected & subscribed");
   return true;
 }
 
-static void ensureMqtt() { if (!mqttClient.connected()) mqttConnectOnce(); }
+static void ensureMqtt() {
+  if (mqttClient.connected()) return;
+  static unsigned long lastAttemptMs = 0;
+  unsigned long now = millis();
+  if (now - lastAttemptMs < 5000) return;
+  lastAttemptMs = now;
+  mqttConnectOnce();
+}
 
 // ---- ARDUINO LIFECYCLE ----
 void setup() {
@@ -1089,9 +1259,14 @@ void setup() {
   shield_out_init_all();
 
   connectToWifi();
+  setupOTA();
   ensureMqtt();
+  publishControllerStatus("ready");
   Serial.println("Multi-pump bridge ready. Raw commands target default pump_1; JSON supports pump_id routing.");
 }
+
+static unsigned long lastHeartbeatMs = 0;
+static const unsigned long HEARTBEAT_INTERVAL_MS = 30000;
 
 void loop() {
   serviceMotorScheduler();
@@ -1105,8 +1280,16 @@ void loop() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    ArduinoOTA.handle();
     if (!mqttClient.connected()) ensureMqtt();
     mqttClient.loop();
+
+    // Periodic heartbeat
+    unsigned long now = millis();
+    if (now - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
+      lastHeartbeatMs = now;
+      publishControllerStatus("alive");
+    }
   }
 
   delay(2);

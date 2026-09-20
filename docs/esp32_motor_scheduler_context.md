@@ -161,7 +161,7 @@ States:
 {
   "pump_1": { "i2c": "0x67", "board": 0, "channel": 1 },
   "pump_2": { "i2c": "0x68", "board": 0, "channel": 2 },
-  "pump_5": { "i2c": "0x6B", "board": 1, "channel": 1 }
+  "phup":   { "i2c": "0x6B", "board": 1, "channel": 1 }
 }
 ```
 

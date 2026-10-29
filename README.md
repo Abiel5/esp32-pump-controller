@@ -75,7 +75,7 @@ The OTA target is `esp32-pump-01.local`. If mDNS does not resolve on your networ
 |---|---|---|
 | `esp32/pump/cmd` | in | Single commands and batches |
 | `esp32/pump/resp` | out | `pump_event`, `batch_event`, `batch_item_event` |
-| `esp32/pump/status` | out | Heartbeat (retained), plus an `offline` last will |
+| `esp32/pump/status` | out | `controller_status`: `online` (retained), `alive` every 30 s, `offline` last will |
 
 Single command:
 
@@ -115,13 +115,10 @@ a completion event as proof of delivery.
 Part of a four-repo hydroponics system:
 
 - [grow-ui](https://github.com/Abiel5/grow-ui) — web control panel, sends the batches
-- [Mycodo fork](https://github.com/Abiel5/Mycodo) — automation and scheduling, also sends batches
+- [Mycodo fork](https://github.com/Abiel5/Mycodo) — records pump events and sensor data; event-driven dosing planned
 - [esp32-sensor-controller](https://github.com/Abiel5/esp32-sensor-controller) — pH, EC and temperature
 
 ## Documentation
 
-- `CLAUDE.md` — architecture, scheduler state machine, batch rules, conventions
-- `docs/mqtt_pump_controller_context_v2.md` — message contract
-- `docs/batch_commands.md` — batch semantics and events
-- `docs/esp32_motor_scheduler_context.md` — motor scheduling design
+- `docs/mqtt_contract.md` — full message contract: commands, batches, events, status
 - `docs/EZO_PMP_Datasheet.pdf` — Atlas pump command reference

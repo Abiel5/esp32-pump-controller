@@ -1,7 +1,4 @@
 .pio/
 compile_commands.json
-
-.vscode/*
-!.vscode/extensions.json
-
+.vscode/
 include/secrets.h

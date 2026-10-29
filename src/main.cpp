@@ -20,7 +20,6 @@
 
 // ---------- MQTT / WiFi SETTINGS ----------
 const char* mqtt_broker       = "10.0.0.232";   // Pi's LAN IP (not 127.0.0.1)
-//const char* mqtt_broker       = "10.0.0.134";   // Pi's LAN IP (not 127.0.0.1)
 const uint16_t mqtt_port      = 1883;
 const char* mqtt_client_id    = "esp32-pump-01"; // <=23 chars, unique per device
 const char* mqtt_cmd_topic    = "esp32/pump/cmd";

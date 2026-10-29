@@ -6,6 +6,11 @@ PROFET board and channel.
 
 All messages are JSON and carry `"v": 1`. Pump IDs are matched case-insensitively.
 
+The general rules for requests, replies, errors and heartbeats are in
+`mqtt_conventions.md`, shared with the sensor controller. The pump firmware does not yet
+follow them fully: it returns `ERR:` strings in `result.raw` instead of `ok`/`error`, and
+treats non-JSON as a legacy raw command. This document describes what it does today.
+
 | Topic | Direction | Purpose |
 |---|---|---|
 | `esp32/pump/cmd` | client → ESP32 | Commands |

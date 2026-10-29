@@ -121,4 +121,5 @@ Part of a four-repo hydroponics system:
 ## Documentation
 
 - `docs/mqtt_contract.md` — full message contract: commands, batches, events, status
+- `docs/mqtt_conventions.md` — message rules shared with the sensor controller
 - `docs/EZO_PMP_Datasheet.pdf` — Atlas pump command reference

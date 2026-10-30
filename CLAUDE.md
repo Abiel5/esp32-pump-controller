@@ -26,7 +26,7 @@ in `src/main.cpp`.
 
 ## Hardware
 
-- **I2C:** SDA = GPIO 22, SCL = GPIO 20, 100 kHz
+- **I2C:** SDA = GPIO 22, SCL = GPIO 20, 50 kHz (see gotcha 6)
 - **PROFET board 0, channels 1-4:** GPIO 32, 33, 27, 25
 - **PROFET board 1, channels 1-2:** GPIO 26, 13
 - A pump's motor power is switched on before its I2C command and off after the job ends.
@@ -136,3 +136,10 @@ The OTA target is `esp32-pump-01.local`.
 5. **The last will matters.** If the device drops, the broker publishes
    `{"state":"offline"}` to `esp32/pump/status`; clients can use that to detect the
    controller being unavailable.
+6. **The I2C bus runs at 50 kHz on purpose.** At 100 kHz the EZO-PMP circuits cut every reply
+   off after two characters (`?I` and then `0xFF` bytes), and short reads return nothing. They
+   answer correctly at 90 kHz and below. The circuits are powered from the Feather's 3V pin
+   and report about 3.07 V in `Status`, under the 3.3 V minimum in their datasheet, which is
+   the likely reason. Dosing only uses the status byte of a reply, so it kept working while the
+   text was broken. Reply text is also limited to printable ASCII, so a bad read cannot put
+   invalid bytes into an MQTT message.

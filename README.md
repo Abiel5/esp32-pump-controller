@@ -19,7 +19,7 @@ it executes what it is told and reports what happened.
 ## Hardware
 
 - **Board:** Adafruit Feather ESP32 v2
-- **Pumps:** 6× Atlas EZO-PMP over I2C (SDA 22, SCL 20, 100 kHz)
+- **Pumps:** 6× Atlas EZO-PMP over I2C (SDA 22, SCL 20, 50 kHz)
 - **Power switching:** Infineon PROFET boards — board 0 on GPIO 32/33/27/25, board 1 on GPIO 26/13
 - **Supply:** 1 A 12 V, which is why only one motor may run at a time
 

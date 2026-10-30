@@ -187,6 +187,11 @@ static String scanI2CBus() {
   return found;
 }
 
+// True for the characters an EZO reply is made of (printable ASCII).
+static inline bool isReplyChar(char c) {
+  return c >= 0x20 && c <= 0x7E;
+}
+
 static CommandResult pumpQuery(const PumpConfig& pump, const String& cmd, uint16_t waitMs) {
   Wire.beginTransmission(pump.i2cAddr);
   Serial.print("pumpQuery[");
@@ -214,7 +219,9 @@ static CommandResult pumpQuery(const PumpConfig& pump, const String& cmd, uint16
   }
   while (Wire.available()) {
     char c = (char)Wire.read();
-    if (c == '\0') {
+    // A reply ends at the null terminator. Anything that is not printable ASCII (for example
+    // 0xFF read from an idle bus) also ends it, so a bad read can never put junk into MQTT.
+    if (!isReplyChar(c)) {
       break;
     }
     resp += c;
@@ -747,7 +754,7 @@ static void serviceMotorScheduler() {
         uint8_t rStatus = Wire.read();
         String rRaw;
         if (rStatus != 1) rRaw += String("STATUS_") + rStatus + " ";
-        while (Wire.available()) { char c = (char)Wire.read(); if (c == '\0') break; rRaw += c; }
+        while (Wire.available()) { char c = (char)Wire.read(); if (!isReplyChar(c)) break; rRaw += c; }
         if (!rRaw.length()) rRaw = (rStatus == 1) ? "OK" : (String("STATUS_") + rStatus);
         resp = {rStatus == 1, rStatus, rRaw};
       }
@@ -1226,8 +1233,11 @@ void setup() {
   Serial.println("\nStarting ESP32 Pump Controller...");
 
   Wire.begin(I2C_SDA, I2C_SCL);
-  Wire.setClock(100000);
-  Serial.printf("I2C init SDA=%d SCL=%d\n", I2C_SDA, I2C_SCL);
+  // 50 kHz, not the usual 100 kHz. The EZO-PMP circuits cannot finish a reply at 100 kHz (the
+  // text is cut off after two characters) but answer correctly at 90 kHz and below. They are
+  // powered from the Feather's 3V pin and report about 3.07 V, under their 3.3 V minimum.
+  Wire.setClock(50000);
+  Serial.printf("I2C init SDA=%d SCL=%d clock=50kHz\n", I2C_SDA, I2C_SCL);
   delay(50);
   String bootScan = scanI2CBus();
   Serial.print("[BOOT] I2C scan: ");

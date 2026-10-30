@@ -44,6 +44,25 @@ Each controller owns three topics, named after the device kind:
 
 Other fields are specific to the verb (for example `post_delay_ms` on a pump batch).
 
+### Standard verbs
+
+A verb means the same thing on every controller that supports it. A controller implements
+only the verbs that make sense for its hardware.
+
+| `type` | Meaning | Used by |
+|---|---|---|
+| `raw` | Pass the device's own command string (`cmd`) straight through to a target | pumps, sensors (`ph`, `ec`) |
+| `read` | Read one target and return its value | sensors |
+| `read_all` | Read every target; answered with a telemetry push | sensors |
+| `batch` | Run several commands in order, with per-step delays | pumps |
+| `batch_abort` | Stop the active batch | pumps |
+| `scan` | List the devices found on the controller's bus | pumps |
+| `rename_pump` | Rename a target in memory (lost on reboot) | pumps |
+
+Controller-specific verbs are allowed (a future outlet controller might add `set`), but a
+verb that already exists above keeps its meaning. Friendlier verbs such as a pump `dose`
+may be added later; `raw` stays as the passthrough.
+
 ## Replies
 
 Every request gets exactly one reply on `resp`, named `<kind>_response`:
@@ -116,4 +135,4 @@ Devices may add fields of their own to `alive` (the pump adds `motor_busy` and
 | Controller | Conforms |
 |---|---|
 | Sensors | Yes. Typed requests and replies, `ok`/`error`, error replies for unknown input. Older forms still accepted. |
-| Pumps | Partly. Uses `type`, `<kind>_response` and events. Still returns `ERR:` strings in `result.raw` instead of `ok`/`error`, and treats non-JSON as a legacy raw command. |
+| Pumps | Partly. Uses `type`, `<kind>_response` and events. Still differs in four ways: a single command has no `type` (target: `raw`; `pump_command` is accepted today), the batch verb is `pump_batch` (target: `batch`), errors are `ERR:` strings in `result.raw` instead of `ok`/`error`, and non-JSON is treated as a legacy raw command. |

@@ -92,7 +92,7 @@ Unknown input is never ignored. These codes are common to every controller:
 | `error` | Meaning |
 |---|---|
 | `invalid_json` | The payload was not valid JSON. |
-| `unknown_type` | `type` (or the legacy `cmd` verb) is not one this controller handles. |
+| `unknown_type` | `type` is missing or not one this controller handles. |
 
 An error reply to input that carried no `request_id` omits it.
 
@@ -127,17 +127,17 @@ Devices may add fields of their own to `alive` (the pump adds `motor_busy` and
 
 ## Compatibility
 
-- Controllers keep accepting the older request forms while clients migrate, and keep the
-  older reply fields next to the new ones. Today that means the verb in `cmd` instead of
-  `type`, and `status`, `value`, `air_temp`, `air_hum` and `raw_response` at the top level
-  of sensor replies.
-- Once every client uses the typed forms, the older fields are removed and `v` becomes `2`.
+- There is one form of each message. A controller that conforms does not accept older
+  request forms or send older reply fields, so a client built for the old shape fails
+  visibly (an `unknown_type` error) instead of working by accident.
+- `v` stays `1` while firmware and clients are deployed together by one operator. Raise it
+  if a controller ever has to serve clients of two generations at once.
 - A change to the envelope must land in every firmware repo, grow-ui and the Mycodo side
-  together.
+  together, and be deployed in one sitting.
 
 ## Status of each controller
 
 | Controller | Conforms |
 |---|---|
-| Sensors | Yes. Typed requests and replies, `ok`/`error`, error replies for unknown input. Older forms still accepted. |
+| Sensors | Yes. Typed requests and replies, `ok`/`error`, error replies for unknown input. Older forms are no longer accepted. |
 | Pumps | Partly. Uses `type`, `<kind>_response` and events. Still differs in four ways: a single command has no `type` (target: `raw`; `pump_command` is accepted today), the batch verb is `pump_batch` (target: `batch`), a batch is identified by `batch_id` (target: its `request_id`), errors are `ERR:` strings in `result.raw` instead of `ok`/`error`, and non-JSON is treated as a legacy raw command. |

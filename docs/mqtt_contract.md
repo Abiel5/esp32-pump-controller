@@ -9,7 +9,8 @@ All messages are JSON and carry `"v": 1`. Pump IDs are matched case-insensitivel
 The general rules for requests, replies, errors and heartbeats are in
 `mqtt_conventions.md`, shared with the sensor controller. The pump firmware does not yet
 follow them fully: a single command has no `type` (the convention is `raw`), the batch verb
-is `pump_batch` (the convention is `batch`), errors are `ERR:` strings in `result.raw`
+is `pump_batch` (the convention is `batch`), a batch is identified by `batch_id` (the
+convention is its `request_id`), errors are `ERR:` strings in `result.raw`
 instead of `ok`/`error`, and non-JSON is treated as a legacy raw command. This document
 describes what it does today.
 

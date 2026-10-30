@@ -12,7 +12,7 @@ it executes what it is told and reports what happened.
 - Subscribes to `esp32/pump/cmd` and routes commands by logical `pump_id`
 - Switches 12 V motor power per pump via PROFET before and after each I2C transaction
 - Runs a single-motor scheduler with a bounded job queue (one motor at a time)
-- Executes multi-step `pump_batch` sequences with per-step mixing delays
+- Executes multi-step `batch` sequences with per-step mixing delays
 - Publishes granular events to `esp32/pump/resp` and a retained heartbeat to `esp32/pump/status`
 - Supports OTA firmware updates over WiFi
 
@@ -80,7 +80,7 @@ The OTA target is `esp32-pump-01.local`. If mDNS does not resolve on your networ
 Single command:
 
 ```json
-{ "v": 1, "pump_id": "calmag", "cmd": "D,5.00", "wait_ms": 300, "request_id": "req-001" }
+{ "v": 1, "type": "raw", "pump_id": "calmag", "cmd": "D,5.00", "wait_ms": 300, "request_id": "req-001" }
 ```
 
 Batch (up to 16 items, executed in order, `post_delay_ms` is a mixing wait after each step):
@@ -88,8 +88,8 @@ Batch (up to 16 items, executed in order, `post_delay_ms` is a mixing wait after
 ```json
 {
   "v": 1,
-  "type": "pump_batch",
-  "batch_id": "nutrient-abc123",
+  "type": "batch",
+  "request_id": "nutrient-abc123",
   "options": { "stop_on_error": true },
   "commands": [
     { "item_id": "step-1", "pump_id": "calmag", "cmd": "D,138.04", "post_delay_ms": 600000 },
@@ -103,7 +103,7 @@ Test from the Pi:
 ```bash
 mosquitto_sub -h 10.0.0.232 -u mqttclient -P '<pass>' -t 'esp32/pump/resp' -v
 mosquitto_pub -h 10.0.0.232 -u mqttclient -P '<pass>' -t 'esp32/pump/cmd' \
-  -m '{"v":1,"pump_id":"calmag","cmd":"i","wait_ms":300,"request_id":"test-1"}'
+  -m '{"v":1,"type":"raw","pump_id":"calmag","cmd":"i","wait_ms":300,"request_id":"test-1"}'
 ```
 
 Dose completion is estimated from `mL / mlPerSec`, not measured — the scheduler does not

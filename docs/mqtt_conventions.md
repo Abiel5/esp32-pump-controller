@@ -47,7 +47,7 @@ Other fields are specific to the verb (for example `post_delay_ms` on a pump bat
 A request that starts something long-running, such as a batch, is identified by its
 `request_id`. There is no separate batch id on the wire: the `batch_event` and
 `batch_item_event` messages carry the batch's `request_id`, and `item_id` for the step. The
-event `type` says what kind of job it is. (Today the pump still uses `batch_id`; see below.)
+event `type` says what kind of job it is.
 
 ### Standard verbs
 
@@ -140,4 +140,4 @@ Devices may add fields of their own to `alive` (the pump adds `motor_busy` and
 | Controller | Conforms |
 |---|---|
 | Sensors | Yes. Typed requests and replies, `ok`/`error`, error replies for unknown input. Older forms are no longer accepted. |
-| Pumps | Partly. Uses `type`, `<kind>_response` and events. Still differs in four ways: a single command has no `type` (target: `raw`; `pump_command` is accepted today), the batch verb is `pump_batch` (target: `batch`), a batch is identified by `batch_id` (target: its `request_id`), errors are `ERR:` strings in `result.raw` instead of `ok`/`error`, and non-JSON is treated as a legacy raw command. |
+| Pumps | Yes. `raw`, `batch` and the other verbs are selected by `type`; every request gets a `pump_response` with `ok`/`error`; unknown input gets an error reply. Older forms are no longer accepted. |

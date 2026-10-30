@@ -50,13 +50,16 @@ Mycodo pump options. Each entry also carries `mlPerSec`, currently `1.0` for eve
 
 | Topic | Direction | Purpose |
 |---|---|---|
-| `esp32/pump/cmd` | in | Single commands and `pump_batch` |
-| `esp32/pump/resp` | out | `pump_event`, `batch_event`, `batch_item_event` (not retained) |
+| `esp32/pump/cmd` | in | `raw`, `batch`, `batch_abort`, `scan`, `rename_pump` |
+| `esp32/pump/resp` | out | `pump_response`, `pump_event`, `batch_event`, `batch_item_event` (not retained) |
 | `esp32/pump/status` | out | `controller_status`: `online` (retained), `ready`, `alive` every 30 s, last will `offline` |
 
-Every message carries `"v": 1`. Commands carry a caller-assigned `request_id` that is
-echoed back. Batch items are correlated as `batchId:itemId`. Full examples are in the
-README and `docs/`.
+Every message carries `"v": 1`, and requests select their handler with `type`. Requests
+carry a caller-assigned `request_id` that is echoed back; a batch is identified by its
+`request_id`, and its motor jobs are correlated as `<request_id>:<item_id>`. Every request
+gets one `pump_response` with `ok` and either `result` or an `error` code. Anything that is
+not valid JSON or has an unknown `type` gets an error reply. The shared rules are in
+`docs/mqtt_conventions.md`; the full contract is in `docs/mqtt_contract.md`.
 
 Useful Atlas EZO-PMP commands: `D,<mL>` dose, `DS,<mL>,<min>` dose over time, `DC,<mL/min>`
 continuous rate, `R` run, `X` stop (returns `*DONE,<mL>`), `P` pause, `i` info.
@@ -128,7 +131,7 @@ The OTA target is `esp32-pump-01.local`.
 3. **Single-threaded loop.** There is no RTOS. The scheduler, batch processor and MQTT loop
    run in sequence with a 2 ms delay, so a blocking I2C call or a long MQTT callback stalls
    everything.
-4. **`rename_pump` is runtime-only.** The `bridge_command` type can rename a pump, but the
+4. **`rename_pump` is runtime-only.** The `rename_pump` request can rename a pump, but the
    change is lost on reboot.
 5. **The last will matters.** If the device drops, the broker publishes
    `{"state":"offline"}` to `esp32/pump/status`; clients can use that to detect the

@@ -51,18 +51,18 @@ struct PumpConfig {
 static const uint8_t CHANNELS_PER_BOARD = 4;
 // Per-board GPIO mapping for PROFET control.
 static const int8_t BOARD_OUT_PINS[][CHANNELS_PER_BOARD] = {
-  {32, 33, 27, 25},   // Board 0: pump_1–pump_4
+  {32, 33, 27, 25},   // Board 0: calmag, micro, gro, bloom
   {26, 13, -1, -1},   // Board 1: phup–phdown
 };
 static const size_t BOARD_COUNT = sizeof(BOARD_OUT_PINS) / sizeof(BOARD_OUT_PINS[0]);
 
 static PumpConfig pumps[] = {
-  {"calmag", 0x64, 0, 1, 1.0f},  // pump_1 — Cal-Mag
-  {"micro",  0x65, 0, 2, 1.0f},  // pump_2 — FloraMicro
-  {"gro",    0x66, 0, 3, 1.0f},  // pump_3 — FloraGro
-  {"bloom",  0x68, 0, 4, 1.0f},  // pump_4 — FloraBloom
-  {"phup",   0x69, 1, 1, 1.0f},  // pump_5 — pH Up
-  {"phdown", 0x6A, 1, 2, 1.0f},  // pump_6 — pH Down
+  {"calmag", 0x64, 0, 1, 1.0f},  // Cal-Mag
+  {"micro",  0x65, 0, 2, 1.0f},  // FloraMicro
+  {"gro",    0x66, 0, 3, 1.0f},  // FloraGro
+  {"bloom",  0x68, 0, 4, 1.0f},  // FloraBloom
+  {"phup",   0x69, 1, 1, 1.0f},  // pH Up
+  {"phdown", 0x6A, 1, 2, 1.0f},  // pH Down
   //{"pump_7", 0x67, 1, 3, 1.0f},
 };
 static const size_t PUMP_COUNT = sizeof(pumps) / sizeof(pumps[0]);
@@ -166,10 +166,6 @@ static const PumpConfig* findPumpById(const String& pumpId) {
     }
   }
   return nullptr;
-}
-
-static const PumpConfig& defaultPump() {
-  return pumps[0];
 }
 
 static String scanI2CBus() {
@@ -316,6 +312,47 @@ static float parseDoneResponse(const String& raw) {
   return -1.0f;
 }
 
+// Normalizes a firmware or pump error string ("ERR:MOTOR_BUSY active=gro", "I2C_ERR_2",
+// "NO_DATA") to a snake-case code. Strings that already are codes pass through.
+static String toErrorCode(const String& raw) {
+  if (raw.startsWith("ERR:")) {
+    String code;
+    for (size_t i = 4; i < raw.length(); i++) {
+      char ch = raw[i];
+      if (ch == ':' || ch == ' ' || ch == '=') break;
+      code += (char)tolower(ch);
+    }
+    return code.length() ? code : String("error");
+  }
+  if (raw.startsWith("I2C_ERR_"))  return "i2c_error";
+  if (raw.startsWith("PINMAP_ERR")) return "pinmap_error";
+  if (raw.startsWith("STATUS_"))   return "pump_error";
+  if (raw == "NO_DATA")            return "no_data";
+
+  bool isCode = raw.length() > 0;
+  for (size_t i = 0; i < raw.length(); i++) {
+    char ch = raw[i];
+    if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_')) { isCode = false; break; }
+  }
+  return isCode ? raw : String("pump_error");
+}
+
+// Sets doc[key] to the error code, and "message" to the original text when it has more detail.
+static void setErrorFields(JsonDocument& doc, const char* key, const String& raw) {
+  String code = toErrorCode(raw);
+  doc[key] = code;
+  if (code != raw && raw.length()) doc["message"] = raw;
+}
+
+// Envelope shared by every reply on the resp topic.
+static void beginResponse(JsonDocument& resp, const String& requestId, bool ok, const String& rawError = "") {
+  resp["v"] = 1;
+  resp["type"] = "pump_response";
+  if (requestId.length()) resp["request_id"] = requestId;
+  resp["ok"] = ok;
+  if (!ok) setErrorFields(resp, "error", rawError);
+}
+
 static void publishControllerStatus(const String& state, bool retained = false) {
   JsonDocument doc;
   doc["v"] = 1;
@@ -347,7 +384,7 @@ static void publishPumpEvent(const String& pumpId, const String& requestId, cons
   if (requestId.length()) evt["request_id"] = requestId;
   evt["state"] = state;
   if (queuePosition > 0) evt["queue_position"] = queuePosition;
-  if (reason.length()) evt["reason"] = reason;
+  if (reason.length()) setErrorFields(evt, "reason", reason);
   if (dose.requestedMl >= 0) evt["requested_ml"] = dose.requestedMl;
   if (dose.estimatedMl >= 0) evt["estimated_ml"] = dose.estimatedMl;
   if (dose.reportedMl  >= 0) evt["reported_ml"]  = dose.reportedMl;
@@ -362,11 +399,11 @@ static void publishBatchEvent(const String& batchId, const String& state, int fa
   JsonDocument evt;
   evt["v"] = 1;
   evt["type"] = "batch_event";
-  evt["batch_id"] = batchId;
+  if (batchId.length()) evt["request_id"] = batchId;
   evt["state"] = state;
   if (activeBatch.active) evt["count"] = (int)activeBatch.totalCount;
   if (failedIndex >= 0) evt["failed_index"] = failedIndex;
-  if (reason.length()) evt["reason"] = reason;
+  if (reason.length()) setErrorFields(evt, "reason", reason);
   String payload;
   serializeJson(evt, payload);
   mqttClient.publish(mqtt_resp_topic, payload.c_str(), false);
@@ -376,14 +413,14 @@ static void publishBatchItemEvent(const String& batchId, const BatchItem& item, 
   JsonDocument evt;
   evt["v"] = 1;
   evt["type"] = "batch_item_event";
-  evt["batch_id"] = batchId;
+  if (batchId.length()) evt["request_id"] = batchId;
   if (item.itemId.length()) evt["item_id"] = item.itemId;
   evt["pump_id"] = item.pumpId;
   evt["cmd"] = item.cmd;
   evt["state"] = state;
   evt["index"] = (int)index;
   if (postDelayMs > 0) evt["post_delay_ms"] = postDelayMs;
-  if (reason.length()) evt["reason"] = reason;
+  if (reason.length()) setErrorFields(evt, "reason", reason);
   if (dose.requestedMl >= 0) evt["requested_ml"] = dose.requestedMl;
   if (dose.estimatedMl >= 0) evt["estimated_ml"] = dose.estimatedMl;
   if (dose.reportedMl  >= 0) evt["reported_ml"]  = dose.reportedMl;
@@ -550,7 +587,7 @@ static void advanceBatch(bool lastItemFailed, bool publishPriorCompleted, const 
   JsonDocument doneEvt;
   doneEvt["v"] = 1;
   doneEvt["type"] = "batch_event";
-  doneEvt["batch_id"] = doneBatchId;
+  if (doneBatchId.length()) doneEvt["request_id"] = doneBatchId;
   doneEvt["state"] = "completed";
   doneEvt["count"] = (int)doneCount;
   String donePayload;
@@ -808,12 +845,12 @@ static void setupOTA() {
 
 // ---- BATCH COMMAND PROCESSOR ----
 // Returns an error string on failure, empty string on success.
-static String processBatchCommand(const JsonDocument& doc) {
+// The batch is identified by the request_id of the request that started it.
+static String processBatchCommand(const JsonDocument& doc, const String& requestId) {
   if (activeBatch.active) return "ERR:BATCH_ALREADY_ACTIVE";
   if (activeJob.busy)     return "ERR:MOTOR_BUSY";
 
-  String batchId;
-  if (!doc["batch_id"].isNull()) batchId = doc["batch_id"].as<String>();
+  const String& batchId = requestId;
 
   JsonArrayConst cmds = doc["commands"].as<JsonArrayConst>();
   if (cmds.isNull() || cmds.size() == 0) return "ERR:COMMANDS_MISSING_OR_EMPTY";
@@ -930,9 +967,178 @@ static String processBatchCommand(const JsonDocument& doc) {
 }
 
 // ---- MQTT MESSAGE HANDLER ----
+// Every request gets one pump_response on the resp topic: ok, then result or error.
+static void publishResponse(JsonDocument& resp) {
+  String payload;
+  serializeJson(resp, payload);
+  mqttClient.publish(mqtt_resp_topic, payload.c_str(), false);
+  Serial.print("[MQTT] TX resp="); Serial.println(payload);
+}
+
+// type "raw": one EZO-PMP command for one pump.
+static void handleRaw(const JsonDocument& doc, const String& requestId, JsonDocument& resp) {
+  String pumpId;
+  if (!doc["pump_id"].isNull()) pumpId = doc["pump_id"].as<String>();
+
+  String cmd;
+  if (!doc["cmd"].isNull()) cmd = doc["cmd"].as<String>();
+
+  uint16_t waitMs = 300;
+  if (!doc["wait_ms"].isNull()) waitMs = doc["wait_ms"].as<uint16_t>();
+
+  bool queueIfBusy = true;
+  if (!doc["options"]["queue_if_busy"].isNull()) {
+    queueIfBusy = doc["options"]["queue_if_busy"].as<bool>();
+  }
+
+  bool ok = false;
+  uint8_t statusCode = 0;
+  String raw;
+
+  const PumpConfig* pump = pumpId.length() ? findPumpById(pumpId) : nullptr;
+  if (!pumpId.length()) {
+    raw = "ERR:PUMP_ID_MISSING";
+  } else if (!pump) {
+    raw = String("ERR:PUMP_NOT_FOUND:") + pumpId;
+  } else if (!cmd.length()) {
+    raw = "ERR:CMD_MISSING";
+  } else {
+    bool motorCmd = isMotorCommand(cmd);
+    bool stopCmd = cmd.equalsIgnoreCase("X");
+    bool pauseCmd = cmd.equalsIgnoreCase("P");
+
+    if (!motorCmd) {
+      CommandResult pResp = processImmediateCommandForPump(*pump, cmd, waitMs);
+      ok = pResp.ok;
+      statusCode = pResp.statusCode;
+      raw = pResp.raw;
+    } else if (stopCmd) {
+      CommandResult sResp = stopActiveMotorForPump(pumpId);
+      ok = sResp.ok;
+      statusCode = sResp.statusCode;
+      raw = sResp.raw;
+    } else if (pauseCmd) {
+      if (!activeJob.busy) {
+        raw = "ERR:NO_ACTIVE_MOTOR";
+      } else if (!activeJob.pumpId.equalsIgnoreCase(pumpId)) {
+        raw = String("ERR:ACTIVE_MOTOR_OTHER:") + activeJob.pumpId;
+      } else {
+        CommandResult pResp = pumpQuery(*pump, cmd, waitMs);
+        ok = pResp.ok;
+        statusCode = pResp.statusCode;
+        raw = pResp.raw;
+      }
+    } else if (activeJob.busy) {
+      if (queueIfBusy) {
+        PumpJob job{pumpId, requestId, cmd, waitMs};
+        int pos = -1;
+        if (enqueueMotorJob(job, pos)) {
+          ok = true;
+          statusCode = 1;
+          raw = "QUEUED";
+          publishPumpEvent(pumpId, requestId, "queued", pos);
+        } else {
+          raw = "ERR:QUEUE_FULL";
+          publishPumpEvent(pumpId, requestId, "rejected", -1, "queue_full");
+        }
+      } else {
+        raw = String("ERR:MOTOR_BUSY active=") + activeJob.pumpId;
+        publishPumpEvent(pumpId, requestId, "rejected", -1, "motor_busy");
+      }
+    } else {
+      PumpJob job{pumpId, requestId, cmd, waitMs};
+      CommandResult startRes = startMotorJob(job);
+      ok = startRes.ok;
+      statusCode = startRes.statusCode;
+      raw = startRes.ok ? "RUNNING" : startRes.raw;
+      if (startRes.ok) {
+        DoseMeta runDose; runDose.requestedMl = parseDoseMl(cmd);
+        publishPumpEvent(pumpId, requestId, "running", -1, "", runDose);
+      } else {
+        publishPumpEvent(pumpId, requestId, "rejected", -1, startRes.raw);
+      }
+    }
+  }
+
+  beginResponse(resp, requestId, ok, raw);
+  if (pumpId.length()) resp["pump_id"] = pumpId;
+  if (ok) {
+    JsonObject resultObj = resp["result"].to<JsonObject>();
+    resultObj["raw"] = raw;
+    resultObj["status_code"] = statusCode;
+  }
+}
+
+// type "batch_abort": stop the running motor and end the active batch.
+static void handleBatchAbort(const String& requestId, JsonDocument& resp) {
+  if (!activeBatch.active) {
+    beginResponse(resp, requestId, false, "no_active_batch");
+    return;
+  }
+  String abortedBatchId = activeBatch.batchId;
+  size_t abortedAt = activeBatch.currentIndex;
+  // Mark inactive first so clearActiveJob won't try to advance the batch
+  activeBatch.active = false;
+  activeBatch.waitingForMotor = false;
+  activeBatch.waitingPostDelay = false;
+  // Stop the running motor immediately
+  if (activeJob.busy && activeJob.pump) {
+    pumpQuery(*activeJob.pump, "X", 150);
+    clearActiveJob(false, false);
+  }
+  publishBatchEvent(abortedBatchId, "aborted", (int)abortedAt, "abort_requested");
+
+  beginResponse(resp, requestId, true);
+  JsonObject resultObj = resp["result"].to<JsonObject>();
+  resultObj["batch_request_id"] = abortedBatchId;
+  resultObj["aborted_at"] = (int)abortedAt;
+}
+
+// type "scan": list the I2C addresses that answer on the bus.
+static void handleScan(const String& requestId, JsonDocument& resp) {
+  beginResponse(resp, requestId, true);
+  resp["result"].to<JsonObject>()["raw"] = scanI2CBus();
+}
+
+// type "rename_pump": change a pump's ID in memory only (lost on reboot).
+static void handleRenamePump(const JsonDocument& doc, const String& requestId, JsonDocument& resp) {
+  String fromId, toId;
+  if (!doc["from_id"].isNull()) fromId = doc["from_id"].as<String>();
+  if (!doc["to_id"].isNull())   toId   = doc["to_id"].as<String>();
+
+  String err;
+  if (!fromId.length() || !toId.length()) {
+    err = "ERR:MISSING_FROM_ID_OR_TO_ID";
+  } else if (toId.length() >= 24) {
+    err = "ERR:TO_ID_TOO_LONG";
+  } else {
+    PumpConfig* target = nullptr;
+    bool conflict = false;
+    for (size_t i = 0; i < PUMP_COUNT; i++) {
+      if (!target && fromId.equalsIgnoreCase(pumps[i].pumpId)) target = &pumps[i];
+      if (toId.equalsIgnoreCase(pumps[i].pumpId)) conflict = true;
+    }
+    if (!target) {
+      err = String("ERR:PUMP_NOT_FOUND:") + fromId;
+    } else if (conflict) {
+      err = String("ERR:ID_ALREADY_EXISTS:") + toId;
+    } else {
+      strncpy(target->pumpId, toId.c_str(), 23);
+      target->pumpId[23] = '\0';
+    }
+  }
+
+  beginResponse(resp, requestId, err.length() == 0, err);
+  if (!err.length()) {
+    JsonObject resultObj = resp["result"].to<JsonObject>();
+    resultObj["from_id"] = fromId;
+    resultObj["to_id"] = toId;
+  }
+}
+
 static void onMqttMessage(char* topic, byte* payload, unsigned int len) {
   // Convert payload -> String (not null-terminated)
-  String msg; 
+  String msg;
   msg.reserve(len + 1);
   for (unsigned int i = 0; i < len; i++) {
     msg += (char)payload[i];
@@ -942,251 +1148,36 @@ static void onMqttMessage(char* topic, byte* payload, unsigned int len) {
   Serial.print("[MQTT] RX topic="); Serial.print(topic);
   Serial.print(" payload="); Serial.println(msg);
 
-  String result;
-  bool requestWasJson = false;
-
-  // JSON mode (multi-pump routing + bridge commands)
+  JsonDocument resp;
   JsonDocument doc;
-  DeserializationError jerr = deserializeJson(doc, msg);
-  if (!jerr) {
-    requestWasJson = true;
-    String requestId;
-    if (!doc["request_id"].isNull()) {
-      requestId = doc["request_id"].as<String>();
-    } else if (!doc["meta"]["request_id"].isNull()) {
-      requestId = doc["meta"]["request_id"].as<String>();
-    }
-
-    const char* typeC = nullptr;
-    if (!doc["type"].isNull()) typeC = doc["type"];
-    String type = typeC ? String(typeC) : "pump_command";
-
-    if (type.equalsIgnoreCase("pump_batch")) {
-      String err = processBatchCommand(doc);
-      JsonDocument resp;
-      resp["v"] = 1;
-      resp["type"] = "batch_response";
-      if (!doc["batch_id"].isNull()) resp["batch_id"] = doc["batch_id"].as<String>();
-      resp["ok"] = err.length() == 0;
-      if (err.length()) resp["reason"] = err;
-      serializeJson(resp, result);
-    } else if (type.equalsIgnoreCase("bridge_command")) {
-      String action;
-      if (!doc["command"]["action"].isNull()) action = doc["command"]["action"].as<String>();
-      else if (!doc["action"].isNull()) action = doc["action"].as<String>();
-
-      String raw;
-      bool ok = false;
-      uint8_t statusCode = 0;
-      if (action.equalsIgnoreCase("scan_all") || action.equalsIgnoreCase("scan")) {
-        raw = scanI2CBus();
-        ok = true;
-        statusCode = 1;
-      } else if (action.equalsIgnoreCase("rename_pump")) {
-        String fromId, toId;
-        if (!doc["from_id"].isNull()) fromId = doc["from_id"].as<String>();
-        if (!doc["to_id"].isNull())   toId   = doc["to_id"].as<String>();
-        if (!fromId.length() || !toId.length()) {
-          raw = "ERR:MISSING_FROM_ID_OR_TO_ID";
-        } else if (toId.length() >= 24) {
-          raw = "ERR:TO_ID_TOO_LONG";
-        } else {
-          PumpConfig* target = nullptr;
-          for (size_t i = 0; i < PUMP_COUNT; i++) {
-            if (fromId.equalsIgnoreCase(pumps[i].pumpId)) { target = &pumps[i]; break; }
-          }
-          bool conflict = false;
-          for (size_t i = 0; i < PUMP_COUNT; i++) {
-            if (toId.equalsIgnoreCase(pumps[i].pumpId)) { conflict = true; break; }
-          }
-          if (!target) {
-            raw = String("ERR:PUMP_NOT_FOUND:") + fromId;
-          } else if (conflict) {
-            raw = String("ERR:ID_ALREADY_EXISTS:") + toId;
-          } else {
-            strncpy(target->pumpId, toId.c_str(), 23);
-            target->pumpId[23] = '\0';
-            raw = String("RENAMED:") + fromId + "->" + toId;
-            ok = true;
-            statusCode = 1;
-          }
-        }
-      } else {
-        raw = "ERR:UNKNOWN_BRIDGE_ACTION";
-      }
-
-      JsonDocument resp;
-      resp["v"] = 1;
-      resp["type"] = "bridge_response";
-      if (requestId.length()) resp["request_id"] = requestId;
-      JsonObject resultObj = resp["result"].to<JsonObject>();
-      resultObj["ok"] = ok;
-      resultObj["status_code"] = statusCode;
-      resultObj["raw"] = raw;
-      serializeJson(resp, result);
-    } else if (type.equalsIgnoreCase("batch_abort")) {
-      JsonDocument resp;
-      resp["v"] = 1;
-      resp["type"] = "batch_abort_response";
-      if (activeBatch.active) {
-        String abortedBatchId = activeBatch.batchId;
-        size_t abortedAt = activeBatch.currentIndex;
-        // Mark inactive first so clearActiveJob won't try to advance the batch
-        activeBatch.active = false;
-        activeBatch.waitingForMotor = false;
-        activeBatch.waitingPostDelay = false;
-        // Stop the running motor immediately
-        if (activeJob.busy && activeJob.pump) {
-          pumpQuery(*activeJob.pump, "X", 150);
-          clearActiveJob(false, false);
-        }
-        publishBatchEvent(abortedBatchId, "aborted", (int)abortedAt, "abort_requested");
-        resp["ok"] = true;
-        resp["batch_id"] = abortedBatchId;
-        resp["aborted_at"] = (int)abortedAt;
-      } else {
-        resp["ok"] = false;
-        resp["reason"] = "no_active_batch";
-      }
-      serializeJson(resp, result);
-    } else {
-      String pumpId = "pump_1";
-      if (!doc["pump_id"].isNull()) pumpId = doc["pump_id"].as<String>();
-      else if (!doc["target"]["pump_id"].isNull()) pumpId = doc["target"]["pump_id"].as<String>();
-
-      String cmd;
-      if (!doc["cmd"].isNull()) cmd = doc["cmd"].as<String>();
-      else if (!doc["command"]["value"].isNull()) cmd = doc["command"]["value"].as<String>();
-
-      uint16_t waitMs = 300;
-      if (!doc["wait_ms"].isNull()) waitMs = doc["wait_ms"].as<uint16_t>();
-      else if (!doc["options"]["wait_ms"].isNull()) waitMs = doc["options"]["wait_ms"].as<uint16_t>();
-
-      bool queueIfBusy = true;
-      if (!doc["options"]["queue_if_busy"].isNull()) {
-        queueIfBusy = doc["options"]["queue_if_busy"].as<bool>();
-      }
-
-      bool ok = false;
-      uint8_t statusCode = 0;
-      String raw;
-
-      const PumpConfig* pump = findPumpById(pumpId);
-      if (!pump) {
-        raw = String("ERR:PUMP_NOT_FOUND:") + pumpId;
-      } else if (!cmd.length()) {
-        raw = "ERR:CMD_MISSING";
-      } else {
-        bool motorCmd = isMotorCommand(cmd);
-        bool stopCmd = cmd.equalsIgnoreCase("X");
-        bool pauseCmd = cmd.equalsIgnoreCase("P");
-
-        if (!motorCmd) {
-          CommandResult pResp = processImmediateCommandForPump(*pump, cmd, waitMs);
-          ok = pResp.ok;
-          statusCode = pResp.statusCode;
-          raw = pResp.raw;
-        } else if (stopCmd) {
-          CommandResult sResp = stopActiveMotorForPump(pumpId);
-          ok = sResp.ok;
-          statusCode = sResp.statusCode;
-          raw = sResp.raw;
-        } else if (pauseCmd) {
-          if (!activeJob.busy) {
-            raw = "ERR:NO_ACTIVE_MOTOR";
-          } else if (!activeJob.pumpId.equalsIgnoreCase(pumpId)) {
-            raw = String("ERR:ACTIVE_MOTOR_OTHER:") + activeJob.pumpId;
-          } else {
-            CommandResult pResp = pumpQuery(*pump, cmd, waitMs);
-            ok = pResp.ok;
-            statusCode = pResp.statusCode;
-            raw = pResp.raw;
-          }
-        } else if (activeJob.busy) {
-          if (queueIfBusy) {
-            PumpJob job{pumpId, requestId, cmd, waitMs};
-            int pos = -1;
-            if (enqueueMotorJob(job, pos)) {
-              ok = true;
-              statusCode = 1;
-              raw = "QUEUED";
-              publishPumpEvent(pumpId, requestId, "queued", pos);
-            } else {
-              raw = "ERR:QUEUE_FULL";
-              publishPumpEvent(pumpId, requestId, "rejected", -1, "queue_full");
-            }
-          } else {
-            raw = String("ERR:MOTOR_BUSY active=") + activeJob.pumpId;
-            publishPumpEvent(pumpId, requestId, "rejected", -1, "motor_busy");
-          }
-        } else {
-          PumpJob job{pumpId, requestId, cmd, waitMs};
-          CommandResult startRes = startMotorJob(job);
-          ok = startRes.ok;
-          statusCode = startRes.statusCode;
-          raw = startRes.ok ? "RUNNING" : startRes.raw;
-          if (startRes.ok) {
-            DoseMeta runDose; runDose.requestedMl = parseDoseMl(cmd);
-            publishPumpEvent(pumpId, requestId, "running", -1, "", runDose);
-          } else {
-            publishPumpEvent(pumpId, requestId, "rejected", -1, startRes.raw);
-          }
-        }
-      }
-
-      JsonDocument resp;
-      resp["v"] = 1;
-      resp["type"] = "pump_response";
-      resp["pump_id"] = pumpId;
-      if (requestId.length()) resp["request_id"] = requestId;
-      JsonObject resultObj = resp["result"].to<JsonObject>();
-      resultObj["ok"] = ok;
-      resultObj["status_code"] = statusCode;
-      resultObj["raw"] = raw;
-      serializeJson(resp, result);
-    }
-  }
-  // Legacy mode: raw ASCII command on single topic -> default pump
-  else {
-    if (msg.equalsIgnoreCase("SCAN")) {
-      result = scanI2CBus();
-    } else if (isMotorCommand(msg)) {
-      if (msg.equalsIgnoreCase("X")) {
-        CommandResult sResp = stopActiveMotorForPump(defaultPump().pumpId);
-        result = sResp.raw;
-      } else if (msg.equalsIgnoreCase("P")) {
-        if (!activeJob.busy || !activeJob.pumpId.equalsIgnoreCase(defaultPump().pumpId)) {
-          result = "ERR:NO_ACTIVE_MOTOR";
-        } else {
-          CommandResult pResp = pumpQuery(defaultPump(), msg, 300);
-          result = pResp.raw;
-        }
-      } else if (activeJob.busy) {
-        result = String("ERR:MOTOR_BUSY active=") + activeJob.pumpId;
-      } else {
-        PumpJob job{defaultPump().pumpId, "", msg, 300};
-        CommandResult startRes = startMotorJob(job);
-        if (startRes.ok) {
-          result = "RUNNING";
-          publishPumpEvent(defaultPump().pumpId, "", "running");
-        } else {
-          result = startRes.raw;
-        }
-      }
-    } else {
-      CommandResult legacyResp = processImmediateCommandForPump(defaultPump(), msg, 300);
-      result = legacyResp.raw;
-    }
+  if (deserializeJson(doc, msg)) {
+    beginResponse(resp, "", false, "invalid_json");
+    publishResponse(resp);
+    return;
   }
 
-  if (!result.length() && requestWasJson) {
-    result = "{\"v\":1,\"type\":\"pump_response\",\"result\":{\"ok\":false,\"status_code\":0,\"raw\":\"EMPTY_RESULT\"}}";
+  String requestId;
+  if (!doc["request_id"].isNull()) requestId = doc["request_id"].as<String>();
+
+  // 'type' selects the handler.
+  String type;
+  if (!doc["type"].isNull()) type = doc["type"].as<String>();
+
+  if (type.equalsIgnoreCase("raw")) {
+    handleRaw(doc, requestId, resp);
+  } else if (type.equalsIgnoreCase("batch")) {
+    String err = processBatchCommand(doc, requestId);
+    beginResponse(resp, requestId, err.length() == 0, err);
+  } else if (type.equalsIgnoreCase("batch_abort")) {
+    handleBatchAbort(requestId, resp);
+  } else if (type.equalsIgnoreCase("scan")) {
+    handleScan(requestId, resp);
+  } else if (type.equalsIgnoreCase("rename_pump")) {
+    handleRenamePump(doc, requestId, resp);
+  } else {
+    beginResponse(resp, requestId, false, "unknown_type");
   }
-  if (!result.length() && !requestWasJson) {
-    result = "EMPTY_RESULT";
-  }
-  mqttClient.publish(mqtt_resp_topic, result.c_str(), false);
-  Serial.print("[MQTT] TX resp="); Serial.println(result);
+  publishResponse(resp);
 }
 
 // ---- MQTT CONNECT/RECONNECT ----

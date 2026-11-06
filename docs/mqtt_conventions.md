@@ -112,7 +112,8 @@ Every controller publishes `controller_status` on `status`:
 
 ```json
 { "v": 1, "type": "controller_status", "controller_id": "esp32-sensor-01",
-  "state": "alive", "uptime_sec": 368475, "free_heap": 226960, "wifi_rssi": -52 }
+  "state": "alive", "uptime_sec": 368475, "free_heap": 226960, "heap_total": 308000,
+  "heap_min_free": 198000, "chip_temp": 118.4, "wifi_rssi": -52 }
 ```
 
 | `state` | When |
@@ -121,6 +122,17 @@ Every controller publishes `controller_status` on `status`:
 | `ready` | Once setup has finished |
 | `alive` | Every 30 s |
 | `offline` | Last will, published by the broker if the device drops |
+
+Every `alive` carries these common fields:
+
+| Field | Unit | Notes |
+|---|---|---|
+| `uptime_sec` | s | Since boot |
+| `free_heap` | bytes | Free internal RAM now |
+| `heap_total` | bytes | Total internal RAM, so a client can show usage as a fraction |
+| `heap_min_free` | bytes | Lowest `free_heap` since boot; a low value means RAM nearly ran out at some point |
+| `chip_temp` | °F | Internal die sensor, not ambient air. Omitted if the sensor reads as unavailable, since `-1` is a valid temperature |
+| `wifi_rssi` | dBm | Wi-Fi signal strength |
 
 Devices may add fields of their own to `alive` (the pump adds `motor_busy` and
 `active_batch`).

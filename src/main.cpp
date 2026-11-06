@@ -374,6 +374,14 @@ static void publishControllerStatus(const String& state, bool retained = false) 
   } else if (state == "alive") {
     doc["uptime_sec"] = (unsigned long)(millis() / 1000);
     doc["free_heap"] = (unsigned long)ESP.getFreeHeap();
+    doc["heap_total"] = (unsigned long)ESP.getHeapSize();
+    doc["heap_min_free"] = (unsigned long)ESP.getMinFreeHeap();
+    // Internal die sensor, in °F like every other temperature here. Left out when it reads as
+    // unavailable, since -1 is a valid temperature.
+    float chipC = temperatureRead();
+    if (!isnan(chipC) && chipC > -40.0f && chipC < 125.0f) {
+      doc["chip_temp"] = roundf((chipC * 1.8f + 32.0f) * 10.0f) / 10.0f;
+    }
     doc["wifi_rssi"] = (int)WiFi.RSSI();
     doc["active_batch"] = activeBatch.active;
     doc["motor_busy"] = activeJob.busy;

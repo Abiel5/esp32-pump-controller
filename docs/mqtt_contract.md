@@ -246,12 +246,13 @@ Published to `esp32/pump/status`:
 |---|---|---|
 | `online` | After connecting (retained) | `wifi`, `mqtt`, `ip`, `uptime_sec` |
 | `ready` | Once setup finishes | none |
-| `alive` | Every 30 s | `uptime_sec`, `free_heap`, `wifi_rssi`, `active_batch`, `motor_busy` |
+| `alive` | Every 30 s | `uptime_sec`, `free_heap`, `heap_total`, `heap_min_free`, `chip_temp`, `wifi_rssi`, `active_batch`, `motor_busy` (the common fields are defined in `mqtt_conventions.md`) |
 | `offline` | Last will, published by the broker if the device drops | none |
 
 ```json
 { "v": 1, "type": "controller_status", "controller_id": "esp32-pump-01", "state": "alive",
-  "uptime_sec": 12345, "free_heap": 210000, "wifi_rssi": -55,
+  "uptime_sec": 12345, "free_heap": 210000, "heap_total": 308000, "heap_min_free": 190000,
+  "chip_temp": 118.4, "wifi_rssi": -55,
   "active_batch": false, "motor_busy": false }
 ```
 
